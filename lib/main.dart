@@ -1,3 +1,5 @@
+import 'dart:io';
+import 'package:image_picker/image_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:webview_flutter/webview_flutter.dart';
@@ -40,7 +42,7 @@ class _WebViewPageState extends State<WebViewPage> {
   bool _isLoading = true;
 
   // ไอพีเซิร์ฟเวอร์ Express.js ของคุณ
-  final String _baseUrl = 'http://192.168.56.1:3000';
+  final String _baseUrl = 'https://worldchemical-logistic.sunny420x.com';
 
   @override
   void initState() {
@@ -85,11 +87,12 @@ class _WebViewPageState extends State<WebViewPage> {
         },
       );
 
-    // 2. เปิดสิทธิ์การอัปโหลดไฟล์/เลือกรูปภาพสำหรับ Android
     if (controller.platform is AndroidWebViewController) {
       AndroidWebViewController.enableDebugging(true);
       (controller.platform as AndroidWebViewController)
           .setMediaPlaybackRequiresUserGesture(false);
+      (controller.platform as AndroidWebViewController)
+          .setOnShowFileSelector(_androidFilePicker);
     }
 
     _controller = controller;
@@ -106,50 +109,91 @@ class _WebViewPageState extends State<WebViewPage> {
     }
   }
 
-Future<void> _requestLocationAndSend() async {
-  try {
-    debugPrint('⏳ [Flutter] กำลังดึงพิกัด GPS...');
+  Future<void> _requestLocationAndSend() async {
+    try {
+      debugPrint('⏳ [Flutter] กำลังดึงพิกัด GPS...');
 
-    await _ensureLocationPermission();
+      await _ensureLocationPermission();
 
-    Position? position;
+      Position? position;
+
+      try {
+        // 1. พยายามดึงพิกัดปัจจุบัน (ให้เวลา 5 วินาทีพอ)
+        position = await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.medium,
+            timeLimit: Duration(seconds: 5),
+          ),
+        );
+      } catch (e) {
+        debugPrint('⚠️ [Flutter] ดึงพิกัดปัจจุบัน Timeout/ล้มเหลว พยายามดึง Last Known Position แทน...');
+        // 2. ถ้าดึงพิกัดปัจจุบันไม่ได้ ให้ดึงพิกัดล่าสุดที่เครื่องเคยบันทึกไว้
+        position = await Geolocator.getLastKnownPosition();
+      }
+
+      if (position != null) {
+        debugPrint('📍 [Flutter] ได้รับพิกัดแล้ว: ${position.latitude}, ${position.longitude}');
+        await _setLocation(position);
+      } else {
+        debugPrint('❌ [Flutter] ไม่สามารถหาพิกัด GPS จากเครื่องได้เลย');
+        
+        // (Optional) หากหาไม่เจอจริงๆ สามารถ Mock ค่าจำลองส่งไปทดสอบก่อนได้
+        
+        final mockPosition = Position(
+          latitude: 13.7563, 
+          longitude: 100.5018, 
+          timestamp: DateTime.now(), 
+          accuracy: 0, altitude: 0, heading: 0, speed: 0, speedAccuracy: 0, altitudeAccuracy: 0, headingAccuracy: 0
+        );
+        await _setLocation(mockPosition);
+        
+      }
+
+    } catch (error) {
+      debugPrint('❌ [Flutter Location Error]: $error');
+    }
+  }
+
+  Future<List<String>> _androidFilePicker(FileSelectorParams params) async {
+    final ImagePicker picker = ImagePicker();
+    XFile? photo;
 
     try {
-      // 1. พยายามดึงพิกัดปัจจุบัน (ให้เวลา 5 วินาทีพอ)
-      position = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.medium,
-          timeLimit: Duration(seconds: 5),
+      // แสดงตัวเลือกให้ผู้ใช้เลือกระหว่าง กล้อง กับ คลังภาพ
+      final ImageSource? source = await showDialog<ImageSource>(
+        context: context,
+        builder: (BuildContext context) => AlertDialog(
+          title: const Text('เลือกรูปภาพหลักฐาน'),
+          content: const Text('กรุณาเลือกช่องทางในการอัปโหลดรูปภาพ'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, ImageSource.camera),
+              child: const Text('📸 ถ่ายรูปสด'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, ImageSource.gallery),
+              child: const Text('📁 เลือกจากคลังภาพ'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, null), // 🔥 แก้ไขจาก onClose เป็น onPressed ตรงนี้ครับ
+              child: const Text('ยกเลิก', style: TextStyle(color: Colors.grey)),
+            ),
+          ],
         ),
       );
+
+      if (source != null) {
+        photo = await picker.pickImage(source: source);
+      }
+      
+      if (photo != null) {
+        return <String>[Uri.file(photo.path).toString()];
+      }
     } catch (e) {
-      debugPrint('⚠️ [Flutter] ดึงพิกัดปัจจุบัน Timeout/ล้มเหลว พยายามดึง Last Known Position แทน...');
-      // 2. ถ้าดึงพิกัดปัจจุบันไม่ได้ ให้ดึงพิกัดล่าสุดที่เครื่องเคยบันทึกไว้
-      position = await Geolocator.getLastKnownPosition();
+      debugPrint('⚠️ ข้อผิดพลาด: $e');
     }
-
-    if (position != null) {
-      debugPrint('📍 [Flutter] ได้รับพิกัดแล้ว: ${position.latitude}, ${position.longitude}');
-      await _setLocation(position);
-    } else {
-      debugPrint('❌ [Flutter] ไม่สามารถหาพิกัด GPS จากเครื่องได้เลย');
-      
-      // (Optional) หากหาไม่เจอจริงๆ สามารถ Mock ค่าจำลองส่งไปทดสอบก่อนได้
-      
-      final mockPosition = Position(
-        latitude: 13.7563, 
-        longitude: 100.5018, 
-        timestamp: DateTime.now(), 
-        accuracy: 0, altitude: 0, heading: 0, speed: 0, speedAccuracy: 0, altitudeAccuracy: 0, headingAccuracy: 0
-      );
-      await _setLocation(mockPosition);
-      
-    }
-
-  } catch (error) {
-    debugPrint('❌ [Flutter Location Error]: $error');
+    return <String>[];
   }
-}
 
   Future<void> _ensureLocationPermission() async {
     final serviceEnabled = await Geolocator.isLocationServiceEnabled();
