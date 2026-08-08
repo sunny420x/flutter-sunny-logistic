@@ -6,6 +6,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 void main() {
   runApp(const MyApp());
@@ -67,6 +68,14 @@ class _WebViewPageState extends State<WebViewPage> {
       ..setBackgroundColor(Colors.transparent)
       ..setNavigationDelegate(
         NavigationDelegate(
+          onNavigationRequest: (NavigationRequest request) async {
+            final uri = Uri.parse(request.url);
+            if (_shouldOpenExternal(uri)) {
+              await launchUrl(uri, mode: LaunchMode.externalApplication);
+              return NavigationDecision.prevent;
+            }
+            return NavigationDecision.navigate;
+          },
           onPageFinished: (String url) async {
             setState(() {
               _isLoading = false;
@@ -98,6 +107,16 @@ class _WebViewPageState extends State<WebViewPage> {
     _controller = controller;
     _controller.loadRequest(Uri.parse(_baseUrl));
 }
+  bool _shouldOpenExternal(Uri uri) {
+    final baseUri = Uri.parse(_baseUrl);
+
+    if (uri.scheme == 'http' || uri.scheme == 'https') {
+      return uri.host != baseUri.host;
+    }
+
+    return true;
+  }
+
   Future<void> _checkCookies() async {
     try {
       final cookies = await _cookieManager.getCookies(domain: Uri.parse(_baseUrl));
