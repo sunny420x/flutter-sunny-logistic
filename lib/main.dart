@@ -168,15 +168,24 @@ class _WebViewPageState extends State<WebViewPage> {
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context, ImageSource.camera),
-              child: const Text('📸 ถ่ายรูปสด'),
+              child: const Text('📸 ถ่ายรูปเลย !'),
+              style: TextButton.styleFrom(
+                textStyle: TextStyle(fontSize: 18),
+              ),
             ),
             TextButton(
               onPressed: () => Navigator.pop(context, ImageSource.gallery),
               child: const Text('📁 เลือกจากคลังภาพ'),
+              style: TextButton.styleFrom(
+                textStyle: TextStyle(fontSize: 18),
+              ),
             ),
             TextButton(
-              onPressed: () => Navigator.pop(context, null), // 🔥 แก้ไขจาก onClose เป็น onPressed ตรงนี้ครับ
-              child: const Text('ยกเลิก', style: TextStyle(color: Colors.grey)),
+              onPressed: () => Navigator.pop(context, null),
+              child: const Text('ยกเลิก', style: TextStyle(color: Colors.black)),
+              style: TextButton.styleFrom(
+                textStyle: TextStyle(fontSize: 18),
+              ),
             ),
           ],
         ),
