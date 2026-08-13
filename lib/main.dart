@@ -187,24 +187,24 @@ class _WebViewPageState extends State<WebViewPage> {
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context, ImageSource.camera),
-              child: const Text('📸 ถ่ายรูปเลย !'),
               style: TextButton.styleFrom(
                 textStyle: TextStyle(fontSize: 18),
               ),
+              child: const Text('📸 ถ่ายรูปเลย !'),
             ),
             TextButton(
               onPressed: () => Navigator.pop(context, ImageSource.gallery),
-              child: const Text('📁 เลือกจากคลังภาพ'),
               style: TextButton.styleFrom(
                 textStyle: TextStyle(fontSize: 18),
               ),
+              child: const Text('📁 เลือกจากคลังภาพ'),
             ),
             TextButton(
               onPressed: () => Navigator.pop(context, null),
-              child: const Text('ยกเลิก', style: TextStyle(color: Colors.black)),
               style: TextButton.styleFrom(
                 textStyle: TextStyle(fontSize: 18),
               ),
+              child: const Text('ยกเลิก', style: TextStyle(color: Colors.black)),
             ),
           ],
         ),
