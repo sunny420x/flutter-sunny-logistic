@@ -43,7 +43,7 @@ class _WebViewPageState extends State<WebViewPage> {
   bool _isLoading = true;
 
   // ไอพีเซิร์ฟเวอร์ Express.js ของคุณ
-  final String _baseUrl = 'https://worldchemical-logistic.sunny420x.com';
+  final String _baseUrl = 'https://logistic.worldchemical.co.th';
 
   @override
   void initState() {
@@ -238,14 +238,14 @@ class _WebViewPageState extends State<WebViewPage> {
   }
 
   Future<void> _setLocation(Position position) async {
-    // 💡 ยิงชุดคำสั่งเขียนทับตัวแปรโกลบอลในสคริปต์ EJS ของคุณ พร้อมสั่งรัน loadMyRoute() ต่อเนื่องทันที
+    // 💡 ยิงชุดคำสั่งเขียนทับตัวแปรโกลบอลในสคริปต์ EJS ของคุณ พร้อมสั่งรัน updateDriverMap() ต่อเนื่องทันที
     final String jsCode = '''
       position_latitude = ${position.latitude};
       position_longitude = ${position.longitude};
-      if (typeof loadMyRoute === 'function') {
-        loadMyRoute();
+      if (typeof updateDriverMap === 'function') {
+        updateDriverMap();
       } else {
-        console.log("⚠️ ไม่เจอฟังก์ชัน loadMyRoute() บนหน้าเว็บนี้");
+        console.log("⚠️ ไม่เจอฟังก์ชัน updateDriverMap() บนหน้าเว็บนี้");
       }
     ''';
 
