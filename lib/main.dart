@@ -42,7 +42,6 @@ class _WebViewPageState extends State<WebViewPage> {
   final WebViewCookieManager _cookieManager = WebViewCookieManager();
   bool _isLoading = true;
 
-  // ไอพีเซิร์ฟเวอร์ Express.js ของคุณ
   final String _baseUrl = 'https://logistic.worldchemical.co.th';
 
   @override
@@ -130,7 +129,7 @@ class _WebViewPageState extends State<WebViewPage> {
 
   Future<void> _requestLocationAndSend() async {
     try {
-      debugPrint('⏳ [Flutter] กำลังดึงพิกัด GPS...');
+      debugPrint('[Flutter] กำลังดึงพิกัด GPS...');
 
       await _ensureLocationPermission();
 
@@ -145,18 +144,16 @@ class _WebViewPageState extends State<WebViewPage> {
           ),
         );
       } catch (e) {
-        debugPrint('⚠️ [Flutter] ดึงพิกัดปัจจุบัน Timeout/ล้มเหลว พยายามดึง Last Known Position แทน...');
+        debugPrint('[Flutter] ดึงพิกัดปัจจุบัน Timeout/ล้มเหลว พยายามดึง Last Known Position แทน...');
         // 2. ถ้าดึงพิกัดปัจจุบันไม่ได้ ให้ดึงพิกัดล่าสุดที่เครื่องเคยบันทึกไว้
         position = await Geolocator.getLastKnownPosition();
       }
 
       if (position != null) {
-        debugPrint('📍 [Flutter] ได้รับพิกัดแล้ว: ${position.latitude}, ${position.longitude}');
+        debugPrint('[Flutter] ได้รับพิกัดแล้ว: ${position.latitude}, ${position.longitude}');
         await _setLocation(position);
       } else {
-        debugPrint('❌ [Flutter] ไม่สามารถหาพิกัด GPS จากเครื่องได้เลย');
-        
-        // (Optional) หากหาไม่เจอจริงๆ สามารถ Mock ค่าจำลองส่งไปทดสอบก่อนได้
+        debugPrint('[Flutter] ไม่สามารถหาพิกัด GPS จากเครื่องได้');
         
         final mockPosition = Position(
           latitude: 13.7563, 
@@ -169,7 +166,7 @@ class _WebViewPageState extends State<WebViewPage> {
       }
 
     } catch (error) {
-      debugPrint('❌ [Flutter Location Error]: $error');
+      debugPrint('[Flutter Location Error]: $error');
     }
   }
 
@@ -178,7 +175,6 @@ class _WebViewPageState extends State<WebViewPage> {
     XFile? photo;
 
     try {
-      // แสดงตัวเลือกให้ผู้ใช้เลือกระหว่าง กล้อง กับ คลังภาพ
       final ImageSource? source = await showDialog<ImageSource>(
         context: context,
         builder: (BuildContext context) => AlertDialog(
@@ -218,7 +214,7 @@ class _WebViewPageState extends State<WebViewPage> {
         return <String>[Uri.file(photo.path).toString()];
       }
     } catch (e) {
-      debugPrint('⚠️ ข้อผิดพลาด: $e');
+      debugPrint('ข้อผิดพลาด: $e');
     }
     return <String>[];
   }
@@ -238,20 +234,19 @@ class _WebViewPageState extends State<WebViewPage> {
   }
 
   Future<void> _setLocation(Position position) async {
-    // 💡 ยิงชุดคำสั่งเขียนทับตัวแปรโกลบอลในสคริปต์ EJS ของคุณ พร้อมสั่งรัน updateDriverMap() ต่อเนื่องทันที
     final String jsCode = '''
       position_latitude = ${position.latitude};
       position_longitude = ${position.longitude};
       if (typeof updateDriverMap === 'function') {
         updateDriverMap();
       } else {
-        console.log("⚠️ ไม่เจอฟังก์ชัน updateDriverMap() บนหน้าเว็บนี้");
+        console.log("ไม่เจอฟังก์ชัน updateDriverMap() บนหน้าเว็บนี้");
       }
     ''';
 
     try {
       await _controller.runJavaScript(jsCode);
-      debugPrint('🚀 [Flutter -> EJS Variable] ยิงค่าพิกัดสำเร็จ: ${position.latitude}, ${position.longitude}');
+      debugPrint('[Flutter -> EJS Variable] ยิงค่าพิกัดสำเร็จ: ${position.latitude}, ${position.longitude}');
     } catch (error) {
       debugPrint('Failed to inject location to EJS variables: $error');
     }
