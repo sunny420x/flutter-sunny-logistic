@@ -41,6 +41,7 @@ dependencies:
   google_fonts: ^8.2.1
   image_picker: ^1.2.3
   url_launcher: ^6.3.1
+  webview_flutter_wkwebview: ^3.26.1
   
 dev_dependencies:
   flutter_test:
