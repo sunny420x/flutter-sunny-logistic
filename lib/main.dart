@@ -10,6 +10,7 @@ import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:http/http.dart' as http;
+import 'package:permission_handler/permission_handler.dart';
 
 void main() {
   runApp(const MyApp());
@@ -289,6 +290,14 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
   // สตรีมพิกัดต่อเนื่องผ่าน Foreground Service (Android) / Background Location (iOS)
   // เพื่อให้ยังส่งพิกัดได้แม้ปิดหน้าจอหรือสลับแอปไปทำงานอื่น
   Future<void> _startBackgroundLocationTracking() async {
+    // Android 13+ ต้องขอ POST_NOTIFICATIONS ก่อน ไม่งั้น notification ของ foreground service จะไม่ถูกส่งเลย
+    if (Platform.isAndroid) {
+      final status = await Permission.notification.request();
+      if (!status.isGranted) {
+        debugPrint('[BackgroundLocation] ผู้ใช้ไม่ได้ให้สิทธิ์ Notification, foreground service อาจไม่แสดง notification');
+      }
+    }
+
     final LocationSettings locationSettings;
     if (Platform.isAndroid) {
       locationSettings = AndroidSettings(
