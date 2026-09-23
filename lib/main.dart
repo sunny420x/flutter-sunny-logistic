@@ -311,6 +311,8 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
           notificationTitle: 'Sunny Logistic กำลังติดตามตำแหน่ง',
           notificationText: 'แอปกำลังส่งพิกัดตำแหน่งของคุณให้ระบบขนส่ง',
           enableWakeLock: true,
+          enableWifiLock: true,
+          setOngoing: true,
         ),
       );
     } else if (Platform.isIOS) {
