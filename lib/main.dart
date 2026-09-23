@@ -270,24 +270,58 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
   }
 
   Future<void> _ensureLocationPermission() async {
-    final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    final serviceEnabled =
+        await Geolocator.isLocationServiceEnabled();
+
     if (!serviceEnabled) {
       throw Exception('Location services are disabled.');
     }
-    LocationPermission permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
+
+    // Foreground
+    PermissionStatus foreground =
+        await Permission.locationWhenInUse.status;
+
+    if (!foreground.isGranted) {
+      foreground =
+          await Permission.locationWhenInUse.request();
     }
-    if (permission == LocationPermission.denied || permission == LocationPermission.deniedForever) {
-      throw Exception('Location permission denied.');
+
+    if (!foreground.isGranted) {
+      throw Exception(
+        'Foreground location permission denied: $foreground',
+      );
     }
-    // ขอสิทธิ์ location "Always" เพิ่ม เพื่อให้ยังส่งพิกัดต่อได้แม้ปิดหน้าจอ/แอปอยู่ background
-    if (permission == LocationPermission.whileInUse) {
-      final alwaysPermission = await Geolocator.requestPermission();
-      if (alwaysPermission != LocationPermission.always) {
-        debugPrint('[Flutter] ผู้ใช้ไม่ได้ให้สิทธิ์ Always location, background tracking อาจไม่เสถียร');
+
+    // Background / Always
+    if (Platform.isAndroid) {
+      PermissionStatus background =
+          await Permission.locationAlways.status;
+
+      if (!background.isGranted) {
+        background =
+            await Permission.locationAlways.request();
+      }
+
+      debugPrint(
+        '[LocationPermission] '
+        'foreground=$foreground '
+        'background=$background',
+      );
+
+      if (!background.isGranted) {
+        debugPrint(
+          '[LocationPermission] '
+          'Background location is NOT granted',
+        );
       }
     }
+
+    final geoPermission =
+        await Geolocator.checkPermission();
+
+    debugPrint(
+      '[LocationPermission] Geolocator=$geoPermission',
+    );
   }
 
   // สตรีมพิกัดต่อเนื่องผ่าน Foreground Service (Android) / Background Location (iOS)
@@ -304,12 +338,17 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
     final LocationSettings locationSettings;
     if (Platform.isAndroid) {
       locationSettings = AndroidSettings(
-        accuracy: LocationAccuracy.medium,
+        accuracy: LocationAccuracy.high,
         distanceFilter: 0,
-        intervalDuration: const Duration(minutes: 1),
-        foregroundNotificationConfig: const ForegroundNotificationConfig(
-          notificationTitle: 'Sunny Logistic กำลังติดตามตำแหน่ง',
-          notificationText: 'แอปกำลังส่งพิกัดตำแหน่งของคุณให้ระบบขนส่ง',
+        intervalDuration: const Duration(seconds: 10),
+        forceLocationManager: false,
+
+        foregroundNotificationConfig:
+            const ForegroundNotificationConfig(
+          notificationTitle:
+              'Sunny Logistic กำลังติดตามตำแหน่ง',
+          notificationText:
+              'แอปกำลังส่งพิกัดตำแหน่งของคุณให้ระบบขนส่ง',
           enableWakeLock: true,
           enableWifiLock: true,
           setOngoing: true,
