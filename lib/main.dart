@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io' show Platform;
+import 'dart:convert';
 
 import 'package:image_picker/image_picker.dart';
 import 'package:flutter/material.dart';
@@ -25,12 +26,8 @@ class MyApp extends StatelessWidget {
       title: 'Sunny Logistic',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF1976D2),
-        ),
-        textTheme: GoogleFonts.kanitTextTheme(
-          Theme.of(context).textTheme,
-        ),
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1976D2)),
+        textTheme: GoogleFonts.kanitTextTheme(Theme.of(context).textTheme),
       ),
       home: const WebViewPage(),
     );
@@ -57,16 +54,14 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
   String? _truckId;
   String? _driverId;
   String? _authCookieValue;
+  bool _isLocationTracking = false;
+  bool _trackingStoppedByWeb = false;
   AppLifecycleState _appLifecycleState = AppLifecycleState.resumed;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-
-    _ensureLocationPermission()
-        .then((_) => _startBackgroundLocationTracking())
-        .catchError((e) => debugPrint('Permission error: $e'));
 
     // 1. สร้าง params สำหรับรองรับการเลือกไฟล์บน WebView
     late final PlatformWebViewControllerCreationParams params;
@@ -78,11 +73,27 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
       params = const PlatformWebViewControllerCreationParams();
     }
 
-    final WebViewController controller = WebViewController.fromPlatformCreationParams(params);
+    final WebViewController controller =
+        WebViewController.fromPlatformCreationParams(params);
 
     controller
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setBackgroundColor(Colors.transparent)
+      ..addJavaScriptChannel(
+        'LocationControlChannel',
+        onMessageReceived: (JavaScriptMessage message) {
+          debugPrint('[JS -> Flutter] ${message.message}');
+
+          if (message.message == 'stopLocationTracking') {
+            unawaited(_stopLocationTracking());
+          }
+
+          if (message.message == 'startLocationTracking') {
+            _trackingStoppedByWeb = false;
+            unawaited(_startBackgroundLocationTracking());
+          }
+        },
+      )
       ..setNavigationDelegate(
         NavigationDelegate(
           onNavigationRequest: (NavigationRequest request) async {
@@ -97,34 +108,67 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
             setState(() {
               _isLoading = false;
             });
+
             await _checkCookies();
+            // driver_id มาจาก WebView
             await _cacheDriverContext();
+            // truck_id ดึงจาก API โดย Flutter
+            await _loadTruckId();
+            debugPrint(
+              '[Flutter] context: '
+              'driver_id=$_driverId '
+              'truck_id=$_truckId',
+            );
+
+            if (_driverId == null || _truckId == null) {
+              debugPrint(
+                '[Flutter] Context ยังไม่พร้อม ไม่เริ่ม Background Tracking',
+              );
+              return;
+            }
+
+            await _ensureLocationPermission();
+
+            if (!_trackingStoppedByWeb) {
+              await _startBackgroundLocationTracking();
+
+              await _requestCurrentLocationNow();
+            }
           },
           onWebResourceError: (error) {
             debugPrint('WebView error: ${error.description}');
           },
         ),
-      )
-      ..addJavaScriptChannel(
-        'LocationChannel',
-        onMessageReceived: (JavaScriptMessage message) {
-          if (message.message == 'requestLocation') {
-            _requestLocationAndSend();
-          }
-        },
       );
 
     if (controller.platform is AndroidWebViewController) {
       AndroidWebViewController.enableDebugging(true);
       (controller.platform as AndroidWebViewController)
           .setMediaPlaybackRequiresUserGesture(false);
-      (controller.platform as AndroidWebViewController)
-          .setOnShowFileSelector(_androidFilePicker);
+      (controller.platform as AndroidWebViewController).setOnShowFileSelector(
+        _androidFilePicker,
+      );
     }
 
     _controller = controller;
     _controller.loadRequest(Uri.parse(_baseUrl));
-}
+  }
+
+  Future<void> _stopLocationTracking() async {
+    debugPrint('[BackgroundLocation] STOP requested from WebView');
+
+    _trackingStoppedByWeb = true;
+    _isLocationTracking = false;
+
+    final subscription = _positionStreamSubscription;
+
+    _positionStreamSubscription = null;
+
+    await subscription?.cancel();
+
+    debugPrint('[BackgroundLocation] TRACKING STOPPED');
+  }
+
   bool _shouldOpenExternal(Uri uri) {
     final baseUri = Uri.parse(_baseUrl);
 
@@ -137,7 +181,9 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
 
   Future<void> _checkCookies() async {
     try {
-      final cookies = await _cookieManager.getCookies(domain: Uri.parse(_baseUrl));
+      final cookies = await _cookieManager.getCookies(
+        domain: Uri.parse(_baseUrl),
+      );
       for (var c in cookies) {
         debugPrint('Auth Cookie: ${c.name} = ${c.value}');
         if (c.name == 'auth' && c.value.isNotEmpty) {
@@ -149,23 +195,122 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
     }
   }
 
+  Future<void> _requestCurrentLocationNow() async {
+    if (!_isLocationTracking || _trackingStoppedByWeb) {
+      debugPrint('[Location] Skip immediate request - tracking is stopped');
+      return;
+    }
+
+    try {
+      debugPrint('[Location] Requesting current location now...');
+
+      final position = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          timeLimit: Duration(seconds: 10),
+        ),
+      );
+
+      debugPrint(
+        '[Location] Current position: '
+        '${position.latitude}, ${position.longitude}',
+      );
+
+      // อัปเดต OpenLayers
+      if (_appLifecycleState == AppLifecycleState.resumed) {
+        await _setLocation(position);
+      }
+
+      // ส่ง API ทันที
+      if (_isLocationTracking && !_trackingStoppedByWeb) {
+        await _sendLocationToServer(position);
+      }
+    } catch (e) {
+      debugPrint('[Location] Immediate location error: $e');
+    }
+  }
+
+  Future<bool> _loadTruckId() async {
+    if ((_authCookieValue ?? '').isEmpty) {
+      debugPrint('[Flutter] ไม่มี auth cookie');
+      return false;
+    }
+
+    try {
+      final uri = Uri.parse('$_baseUrl/api/driver/getMyRoute');
+
+      debugPrint('[Flutter] กำลังดึง truck_id จาก API...');
+
+      final response = await http.get(
+        uri,
+        headers: {'Cookie': 'auth=$_authCookieValue'},
+      );
+
+      debugPrint('[Flutter] getMyRoute status=${response.statusCode}');
+
+      if (response.statusCode != 200) {
+        debugPrint('[Flutter] getMyRoute error: ${response.body}');
+        return false;
+      }
+
+      final routes = jsonDecode(response.body);
+
+      if (routes is List && routes.isNotEmpty) {
+        final truckId = routes[0]['truck_id'];
+
+        if (truckId != null) {
+          _truckId = truckId.toString();
+
+          debugPrint('[Flutter] truck_id=$_truckId');
+
+          return true;
+        }
+      }
+
+      debugPrint('[Flutter] ไม่พบ truck_id ใน routes');
+      return false;
+    } catch (e) {
+      debugPrint('[Flutter] load truck_id error: $e');
+      return false;
+    }
+  }
+
   // อ่าน truck_id/driver_id ที่หน้าเว็บตั้งไว้เป็น global variable แล้ว cache เก็บไว้ใน Dart
-  // เพื่อให้ยิงพิกัดขึ้น API ได้แม้ตอนแอปอยู่ background และ WebView ไม่ได้ทำงาน
-  Future<void> _cacheDriverContext() async {
+  Future<bool> _cacheDriverContext() async {
     try {
       final truckIdRaw = await _controller.runJavaScriptReturningResult(
-        'window.truck_id ?? ""',
+        'typeof truck_id !== "undefined" && truck_id != null ? truck_id : ""',
       );
+
       final driverIdRaw = await _controller.runJavaScriptReturningResult(
-        'window.driver_id ?? ""',
+        'typeof driver_id !== "undefined" && driver_id != null ? driver_id : ""',
       );
+
       final truckId = _unwrapJsString(truckIdRaw);
       final driverId = _unwrapJsString(driverIdRaw);
-      if (truckId.isNotEmpty) _truckId = truckId;
-      if (driverId.isNotEmpty) _driverId = driverId;
-      debugPrint('[Flutter] cache driver context: truck_id=$_truckId, driver_id=$_driverId');
+
+      if (truckId.isNotEmpty) {
+        _truckId = truckId;
+      }
+
+      if (driverId.isNotEmpty) {
+        _driverId = driverId;
+      }
+
+      debugPrint(
+        '[Flutter] cache driver context: '
+        'truck_id=$_truckId, '
+        'driver_id=$_driverId',
+      );
+
+      return _truckId != null &&
+          _driverId != null &&
+          _truckId!.isNotEmpty &&
+          _driverId!.isNotEmpty;
     } catch (e) {
       debugPrint('Driver context read error: $e');
+
+      return false;
     }
   }
 
@@ -175,49 +320,6 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
       value = value.substring(1, value.length - 1);
     }
     return value;
-  }
-
-  Future<void> _requestLocationAndSend() async {
-    try {
-      debugPrint('[Flutter] กำลังดึงพิกัด GPS...');
-
-      await _ensureLocationPermission();
-
-      Position? position;
-
-      try {
-        // 1. พยายามดึงพิกัดปัจจุบัน (ให้เวลา 5 วินาทีพอ)
-        position = await Geolocator.getCurrentPosition(
-          locationSettings: const LocationSettings(
-            accuracy: LocationAccuracy.medium,
-            timeLimit: Duration(seconds: 5),
-          ),
-        );
-      } catch (e) {
-        debugPrint('[Flutter] ดึงพิกัดปัจจุบัน Timeout/ล้มเหลว พยายามดึง Last Known Position แทน...');
-        // 2. ถ้าดึงพิกัดปัจจุบันไม่ได้ ให้ดึงพิกัดล่าสุดที่เครื่องเคยบันทึกไว้
-        position = await Geolocator.getLastKnownPosition();
-      }
-
-      if (position != null) {
-        debugPrint('[Flutter] ได้รับพิกัดแล้ว: ${position.latitude}, ${position.longitude}');
-        await _setLocation(position);
-      } else {
-        debugPrint('[Flutter] ไม่สามารถหาพิกัด GPS จากเครื่องได้');
-        
-        final mockPosition = Position(
-          latitude: 13.7563, 
-          longitude: 100.5018, 
-          timestamp: DateTime.now(), 
-          accuracy: 0, altitude: 0, heading: 0, speed: 0, speedAccuracy: 0, altitudeAccuracy: 0, headingAccuracy: 0
-        );
-        await _setLocation(mockPosition);
-        
-      }
-
-    } catch (error) {
-      debugPrint('[Flutter Location Error]: $error');
-    }
   }
 
   Future<List<String>> _androidFilePicker(FileSelectorParams params) async {
@@ -233,24 +335,21 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context, ImageSource.camera),
-              style: TextButton.styleFrom(
-                textStyle: TextStyle(fontSize: 18),
-              ),
+              style: TextButton.styleFrom(textStyle: TextStyle(fontSize: 18)),
               child: const Text('📸 ถ่ายรูปเลย !'),
             ),
             TextButton(
               onPressed: () => Navigator.pop(context, ImageSource.gallery),
-              style: TextButton.styleFrom(
-                textStyle: TextStyle(fontSize: 18),
-              ),
+              style: TextButton.styleFrom(textStyle: TextStyle(fontSize: 18)),
               child: const Text('📁 เลือกจากคลังภาพ'),
             ),
             TextButton(
               onPressed: () => Navigator.pop(context, null),
-              style: TextButton.styleFrom(
-                textStyle: TextStyle(fontSize: 18),
+              style: TextButton.styleFrom(textStyle: TextStyle(fontSize: 18)),
+              child: const Text(
+                'ยกเลิก',
+                style: TextStyle(color: Colors.black),
               ),
-              child: const Text('ยกเลิก', style: TextStyle(color: Colors.black)),
             ),
           ],
         ),
@@ -259,7 +358,7 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
       if (source != null) {
         photo = await picker.pickImage(source: source);
       }
-      
+
       if (photo != null) {
         return <String>[Uri.file(photo.path).toString()];
       }
@@ -270,36 +369,29 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
   }
 
   Future<void> _ensureLocationPermission() async {
-    final serviceEnabled =
-        await Geolocator.isLocationServiceEnabled();
+    final serviceEnabled = await Geolocator.isLocationServiceEnabled();
 
     if (!serviceEnabled) {
       throw Exception('Location services are disabled.');
     }
 
     // Foreground
-    PermissionStatus foreground =
-        await Permission.locationWhenInUse.status;
+    PermissionStatus foreground = await Permission.locationWhenInUse.status;
 
     if (!foreground.isGranted) {
-      foreground =
-          await Permission.locationWhenInUse.request();
+      foreground = await Permission.locationWhenInUse.request();
     }
 
     if (!foreground.isGranted) {
-      throw Exception(
-        'Foreground location permission denied: $foreground',
-      );
+      throw Exception('Foreground location permission denied: $foreground');
     }
 
     // Background / Always
     if (Platform.isAndroid) {
-      PermissionStatus background =
-          await Permission.locationAlways.status;
+      PermissionStatus background = await Permission.locationAlways.status;
 
       if (!background.isGranted) {
-        background =
-            await Permission.locationAlways.request();
+        background = await Permission.locationAlways.request();
       }
 
       debugPrint(
@@ -316,39 +408,38 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
       }
     }
 
-    final geoPermission =
-        await Geolocator.checkPermission();
+    final geoPermission = await Geolocator.checkPermission();
 
-    debugPrint(
-      '[LocationPermission] Geolocator=$geoPermission',
-    );
+    debugPrint('[LocationPermission] Geolocator=$geoPermission');
   }
 
-  // สตรีมพิกัดต่อเนื่องผ่าน Foreground Service (Android) / Background Location (iOS)
-  // เพื่อให้ยังส่งพิกัดได้แม้ปิดหน้าจอหรือสลับแอปไปทำงานอื่น
   Future<void> _startBackgroundLocationTracking() async {
-    // Android 13+ ต้องขอ POST_NOTIFICATIONS ก่อน ไม่งั้น notification ของ foreground service จะไม่ถูกส่งเลย
-    if (Platform.isAndroid) {
-      final status = await Permission.notification.request();
-      if (!status.isGranted) {
-        debugPrint('[BackgroundLocation] ผู้ใช้ไม่ได้ให้สิทธิ์ Notification, foreground service อาจไม่แสดง notification');
-      }
+    if (_isLocationTracking) {
+      debugPrint('[BackgroundLocation] Already running.');
+      return;
     }
 
-    final LocationSettings locationSettings;
+    _trackingStoppedByWeb = false;
+
+    debugPrint('[BackgroundLocation] STARTING...');
+
+    if (Platform.isAndroid) {
+      final notificationStatus = await Permission.notification.request();
+
+      debugPrint('[BackgroundLocation] notification=$notificationStatus');
+    }
+
+    late final LocationSettings locationSettings;
+
     if (Platform.isAndroid) {
       locationSettings = AndroidSettings(
         accuracy: LocationAccuracy.high,
         distanceFilter: 0,
-        intervalDuration: const Duration(seconds: 10),
-        forceLocationManager: false,
+        intervalDuration: const Duration(seconds: 60),
 
-        foregroundNotificationConfig:
-            const ForegroundNotificationConfig(
-          notificationTitle:
-              'Sunny Logistic กำลังติดตามตำแหน่ง',
-          notificationText:
-              'แอปกำลังส่งพิกัดตำแหน่งของคุณให้ระบบขนส่ง',
+        foregroundNotificationConfig: const ForegroundNotificationConfig(
+          notificationTitle: 'Sunny Logistic กำลังติดตามตำแหน่ง',
+          notificationText: 'แอปกำลังส่งพิกัดตำแหน่งของคุณให้ระบบขนส่ง',
           enableWakeLock: true,
           enableWifiLock: true,
           setOngoing: true,
@@ -356,7 +447,7 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
       );
     } else if (Platform.isIOS) {
       locationSettings = AppleSettings(
-        accuracy: LocationAccuracy.medium,
+        accuracy: LocationAccuracy.high,
         activityType: ActivityType.otherNavigation,
         distanceFilter: 0,
         pauseLocationUpdatesAutomatically: false,
@@ -365,39 +456,106 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
       );
     } else {
       locationSettings = const LocationSettings(
-        accuracy: LocationAccuracy.medium,
+        accuracy: LocationAccuracy.high,
         distanceFilter: 0,
       );
     }
 
     await _positionStreamSubscription?.cancel();
-    _positionStreamSubscription = Geolocator.getPositionStream(
-      locationSettings: locationSettings,
-    ).listen(
-      _onBackgroundPosition,
-      onError: (Object e) => debugPrint('[BackgroundLocation] stream error: $e'),
+
+    debugPrint('[BackgroundLocation] Creating stream...');
+
+    _positionStreamSubscription =
+        Geolocator.getPositionStream(locationSettings: locationSettings).listen(
+          (Position position) {
+            debugPrint(
+              '[BackgroundLocation] GPS EVENT '
+              '${DateTime.now().toIso8601String()} '
+              '${position.latitude},${position.longitude}',
+            );
+
+            _onBackgroundPosition(position);
+          },
+          onError: (Object error, StackTrace stackTrace) {
+            debugPrint('[BackgroundLocation] STREAM ERROR: $error');
+            debugPrintStack(stackTrace: stackTrace);
+          },
+          onDone: () {
+            _isLocationTracking = false;
+            _positionStreamSubscription = null;
+            debugPrint('[BackgroundLocation] STREAM DONE !!!');
+          },
+          cancelOnError: false,
+        );
+
+    _isLocationTracking = true;
+
+    debugPrint(
+      '[BackgroundLocation] STREAM CREATED '
+      'isPaused=${_positionStreamSubscription?.isPaused}',
     );
   }
 
   Future<void> _onBackgroundPosition(Position position) async {
-    debugPrint('[BackgroundLocation] ${position.latitude}, ${position.longitude}');
+    if (!_isLocationTracking || _trackingStoppedByWeb) {
+      debugPrint('[GPS] IGNORE - tracking stopped');
+      return;
+    }
+
+    debugPrint(
+      '[GPS] ${DateTime.now().toIso8601String()} '
+      '${position.latitude}, ${position.longitude}',
+    );
+
+    debugPrint('[GPS] lifecycle=$_appLifecycleState');
+
     if (_appLifecycleState == AppLifecycleState.resumed) {
       await _setLocation(position);
     }
+
+    if (!_isLocationTracking || _trackingStoppedByWeb) {
+      debugPrint('[GPS] STOPPED while updating WebView - skip API');
+      return;
+    }
+
     await _sendLocationToServer(position);
   }
 
   Future<void> _sendLocationToServer(Position position) async {
-    if (_truckId == null || _driverId == null || (_authCookieValue ?? '').isEmpty) {
-      debugPrint('[BackgroundLocation] ยังไม่มี truck_id/driver_id/cookie ครบ, ข้ามการส่ง');
+    if (!_isLocationTracking || _trackingStoppedByWeb) {
+      debugPrint('[BackgroundLocation] API SKIP - tracking stopped');
       return;
     }
+
+    if (_truckId == null ||
+        _driverId == null ||
+        (_authCookieValue ?? '').isEmpty) {
+      debugPrint(
+        '[BackgroundLocation] '
+        'ยังไม่มี truck_id/driver_id/cookie ครบ, ข้ามการส่ง',
+      );
+
+      return;
+    }
+
     final uri = Uri.parse(
-      '$_baseUrl/api/saveLocation/$_truckId/$_driverId/${position.latitude}/${position.longitude}',
+      '$_baseUrl/api/saveLocation/'
+      '$_truckId/'
+      '$_driverId/'
+      '${position.latitude}/'
+      '${position.longitude}',
     );
+
     try {
-      final response = await http.get(uri, headers: {'Cookie': 'auth=$_authCookieValue'});
-      debugPrint('[BackgroundLocation] sent -> ${response.statusCode}: ${response.body}');
+      final response = await http.get(
+        uri,
+        headers: {'Cookie': 'auth=$_authCookieValue'},
+      );
+
+      debugPrint(
+        '[BackgroundLocation] '
+        'sent -> ${response.statusCode}: ${response.body}',
+      );
     } catch (e) {
       debugPrint('[BackgroundLocation] send error: $e');
     }
@@ -421,7 +579,8 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
   }
 
   Future<void> _setLocation(Position position) async {
-    final String jsCode = '''
+    final String jsCode =
+        '''
       position_latitude = ${position.latitude};
       position_longitude = ${position.longitude};
       if (typeof updateDriverMap === 'function') {
@@ -433,13 +592,15 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
 
     try {
       await _controller.runJavaScript(jsCode);
-      debugPrint('[Flutter -> EJS Variable] ยิงค่าพิกัดสำเร็จ: ${position.latitude}, ${position.longitude}');
+      debugPrint(
+        'Flutter -> JS Variable to Draw Map and Route ${position.latitude}, ${position.longitude}',
+      );
     } catch (error) {
       debugPrint('Failed to inject location to EJS variables: $error');
     }
   }
 
-@override
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: SafeArea(
