@@ -22,9 +22,12 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Sunny Logistic App',
+      title: 'Sunny Logistic',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF1976D2),
+        ),
         textTheme: GoogleFonts.kanitTextTheme(
           Theme.of(context).textTheme,
         ),
