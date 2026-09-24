@@ -46,8 +46,8 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
   final WebViewCookieManager _cookieManager = WebViewCookieManager();
   bool _isLoading = true;
 
-  // final String _baseUrl = 'https://logistic.worldchemical.co.th';
-  final String _baseUrl = 'http://192.168.1.38:3000';
+  final String _baseUrl = 'https://logistic.worldchemical.co.th';
+  // final String _baseUrl = 'http://192.168.1.29:3000';
 
   // ค่าที่ cache ไว้จาก WebView เพื่อใช้ยิง API ตอนแอปอยู่ background
   StreamSubscription<Position>? _positionStreamSubscription;
@@ -322,10 +322,10 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
     return value;
   }
 
-  Future<List<String>> _androidFilePicker(FileSelectorParams params) async {
+  Future<List<String>> _androidFilePicker(
+    FileSelectorParams params,
+  ) async {
     final ImagePicker picker = ImagePicker();
-    XFile? photo;
-
     try {
       final ImageSource? source = await showDialog<ImageSource>(
         context: context,
@@ -334,18 +334,32 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
           content: const Text('กรุณาเลือกช่องทางในการอัปโหลดรูปภาพ'),
           actions: [
             TextButton(
-              onPressed: () => Navigator.pop(context, ImageSource.camera),
-              style: TextButton.styleFrom(textStyle: TextStyle(fontSize: 18)),
+              onPressed: () => Navigator.pop(
+                context,
+                ImageSource.camera,
+              ),
+              style: TextButton.styleFrom(
+                textStyle: const TextStyle(fontSize: 18),
+              ),
               child: const Text('📸 ถ่ายรูปเลย !'),
             ),
+
             TextButton(
-              onPressed: () => Navigator.pop(context, ImageSource.gallery),
-              style: TextButton.styleFrom(textStyle: TextStyle(fontSize: 18)),
+              onPressed: () => Navigator.pop(
+                context,
+                ImageSource.gallery,
+              ),
+              style: TextButton.styleFrom(
+                textStyle: const TextStyle(fontSize: 18),
+              ),
               child: const Text('📁 เลือกจากคลังภาพ'),
             ),
+
             TextButton(
               onPressed: () => Navigator.pop(context, null),
-              style: TextButton.styleFrom(textStyle: TextStyle(fontSize: 18)),
+              style: TextButton.styleFrom(
+                textStyle: const TextStyle(fontSize: 18),
+              ),
               child: const Text(
                 'ยกเลิก',
                 style: TextStyle(color: Colors.black),
@@ -355,17 +369,39 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
         ),
       );
 
-      if (source != null) {
-        photo = await picker.pickImage(source: source);
+      if (source == null) {
+        return [];
       }
 
-      if (photo != null) {
-        return <String>[Uri.file(photo.path).toString()];
+      if (source == ImageSource.camera) {
+        final XFile? photo = await picker.pickImage(
+          source: ImageSource.camera,
+        );
+
+        if (photo == null) {
+          return [];
+        }
+
+        return [
+          Uri.file(photo.path).toString(),
+        ];
       }
+
+      if (source == ImageSource.gallery) {
+        final List<XFile> photos = await picker.pickMultiImage(
+          imageQuality: 90,
+        );
+
+        return photos.map((photo) {
+          return Uri.file(photo.path).toString();
+        }).toList();
+      }
+
+      return [];
     } catch (e) {
       debugPrint('ข้อผิดพลาด: $e');
+      return [];
     }
-    return <String>[];
   }
 
   Future<void> _ensureLocationPermission() async {
