@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:io' show Platform;
+import 'dart:io' show File, Platform;
 import 'dart:convert';
 
 import 'package:image_picker/image_picker.dart';
@@ -12,6 +12,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:http/http.dart' as http;
 import 'package:permission_handler/permission_handler.dart';
+import 'package:path_provider/path_provider.dart';
 
 void main() {
   runApp(const MyApp());
@@ -42,12 +43,20 @@ class WebViewPage extends StatefulWidget {
 }
 
 class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
+  static const int _maxLocationsPerFlush = 20;
+  static const Duration _locationFlushInterval = Duration(milliseconds: 200);
+
   late final WebViewController _controller;
   final WebViewCookieManager _cookieManager = WebViewCookieManager();
+  final List<Map<String, dynamic>> _pendingLocationBuffer = [];
+  File? _locationBufferFile;
+  Timer? _locationBufferRetryTimer;
+  Future<void> _locationBufferReady = Future<void>.value();
+  Future<void> _locationWork = Future<void>.value();
   bool _isLoading = true;
 
-  final String _baseUrl = 'https://logistic.worldchemical.co.th';
-  // final String _baseUrl = 'http://192.168.1.29:3000';
+  // final String _baseUrl = 'https://logistic.worldchemical.co.th';
+  final String _baseUrl = 'http://192.168.1.29:3000';
 
   // ค่าที่ cache ไว้จาก WebView เพื่อใช้ยิง API ตอนแอปอยู่ background
   StreamSubscription<Position>? _positionStreamSubscription;
@@ -55,13 +64,14 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
   String? _driverId;
   String? _authCookieValue;
   bool _isLocationTracking = false;
-  bool _trackingStoppedByWeb = false;
+  bool _trackingStoppedByWeb = true;
   AppLifecycleState _appLifecycleState = AppLifecycleState.resumed;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _locationBufferReady = _loadLocationBuffer();
 
     // 1. สร้าง params สำหรับรองรับการเลือกไฟล์บน WebView
     late final PlatformWebViewControllerCreationParams params;
@@ -90,7 +100,7 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
 
           if (message.message == 'startLocationTracking') {
             _trackingStoppedByWeb = false;
-            unawaited(_startBackgroundLocationTracking());
+            unawaited(_startTrackingWhenReady());
           }
         },
       )
@@ -124,16 +134,11 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
               debugPrint(
                 '[Flutter] Context ยังไม่พร้อม ไม่เริ่ม Background Tracking',
               );
+              await _stopLocationTracking();
               return;
             }
 
-            await _ensureLocationPermission();
-
-            if (!_trackingStoppedByWeb) {
-              await _startBackgroundLocationTracking();
-
-              await _requestCurrentLocationNow();
-            }
+            await _syncTrackingWithWeb();
           },
           onWebResourceError: (error) {
             debugPrint('WebView error: ${error.description}');
@@ -159,6 +164,8 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
 
     _trackingStoppedByWeb = true;
     _isLocationTracking = false;
+    _locationBufferRetryTimer?.cancel();
+    _locationBufferRetryTimer = null;
 
     final subscription = _positionStreamSubscription;
 
@@ -167,6 +174,33 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
     await subscription?.cancel();
 
     debugPrint('[BackgroundLocation] TRACKING STOPPED');
+  }
+
+  Future<void> _startTrackingWhenReady() async {
+    await _checkCookies();
+    await _cacheDriverContext();
+    await _loadTruckId();
+    if (_trackingStoppedByWeb || _truckId == null || _driverId == null) return;
+    await _ensureLocationPermission();
+    if (_trackingStoppedByWeb) return;
+    await _startBackgroundLocationTracking();
+  }
+
+  Future<void> _syncTrackingWithWeb() async {
+    try {
+      final result = await _controller.runJavaScriptReturningResult(
+        'typeof shouldReportDriverLocation === "function" && shouldReportDriverLocation()',
+      );
+      if (_unwrapJsString(result) == 'true') {
+        _trackingStoppedByWeb = false;
+        await _startTrackingWhenReady();
+      } else {
+        await _stopLocationTracking();
+      }
+    } catch (error) {
+      await _stopLocationTracking();
+      debugPrint('[Location] Cannot read work status: $error');
+    }
   }
 
   bool _shouldOpenExternal(Uri uri) {
@@ -231,6 +265,7 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
   }
 
   Future<bool> _loadTruckId() async {
+    _truckId = null;
     if ((_authCookieValue ?? '').isEmpty) {
       debugPrint('[Flutter] ไม่มี auth cookie');
       return false;
@@ -289,13 +324,8 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
       final truckId = _unwrapJsString(truckIdRaw);
       final driverId = _unwrapJsString(driverIdRaw);
 
-      if (truckId.isNotEmpty) {
-        _truckId = truckId;
-      }
-
-      if (driverId.isNotEmpty) {
-        _driverId = driverId;
-      }
+      _truckId = truckId.isNotEmpty ? truckId : null;
+      _driverId = driverId.isNotEmpty ? driverId : null;
 
       debugPrint(
         '[Flutter] cache driver context: '
@@ -455,7 +485,7 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
       return;
     }
 
-    _trackingStoppedByWeb = false;
+    if (_trackingStoppedByWeb) return;
 
     debugPrint('[BackgroundLocation] STARTING...');
 
@@ -498,6 +528,8 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
     }
 
     await _positionStreamSubscription?.cancel();
+
+    if (_trackingStoppedByWeb || _isLocationTracking) return;
 
     debugPrint('[BackgroundLocation] Creating stream...');
 
@@ -557,44 +589,198 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
     await _sendLocationToServer(position);
   }
 
-  Future<void> _sendLocationToServer(Position position) async {
-    if (!_isLocationTracking || _trackingStoppedByWeb) {
-      debugPrint('[BackgroundLocation] API SKIP - tracking stopped');
-      return;
-    }
+  Future<void> _sendLocationToServer(Position position) {
+    return _queueLocationWork(() async {
+      await _locationBufferReady;
 
-    if (_truckId == null ||
-        _driverId == null ||
-        (_authCookieValue ?? '').isEmpty) {
-      debugPrint(
-        '[BackgroundLocation] '
-        'ยังไม่มี truck_id/driver_id/cookie ครบ, ข้ามการส่ง',
+      if (!_isLocationTracking || _trackingStoppedByWeb) {
+        debugPrint('[BackgroundLocation] API SKIP - tracking stopped');
+        return;
+      }
+
+      // Save each fix before sending so it survives an app restart while
+      // offline.
+      _pendingLocationBuffer.add({
+        'latitude': position.latitude,
+        'longitude': position.longitude,
+        'recordedAt': position.timestamp.toIso8601String(),
+        'truckId': _truckId,
+        'driverId': _driverId,
+      });
+      await _persistLocationBuffer();
+      await _flushLocationBuffer();
+    });
+  }
+
+  Future<void> _queueLocationWork(Future<void> Function() work) {
+    final operation = _locationWork.then((_) => work());
+    _locationWork = operation.catchError(
+      (Object error, StackTrace stackTrace) {
+        debugPrint('[LocationBuffer] queued work failed: $error');
+        debugPrintStack(stackTrace: stackTrace);
+      },
+    );
+    return _locationWork;
+  }
+
+  Future<void> _loadLocationBuffer() async {
+    try {
+      final directory = await getApplicationSupportDirectory();
+      _locationBufferFile = File(
+        '${directory.path}${Platform.pathSeparator}pending_locations.json',
       );
 
-      return;
+      final file = _locationBufferFile!;
+      if (!await file.exists()) return;
+
+      final decoded = jsonDecode(await file.readAsString());
+      if (decoded is! List) return;
+
+      for (final item in decoded) {
+        if (item is! Map) continue;
+        final record = Map<String, dynamic>.from(item);
+        final latitude = record['latitude'];
+        final longitude = record['longitude'];
+        if (latitude is! num || longitude is! num) continue;
+        record['latitude'] = latitude.toDouble();
+        record['longitude'] = longitude.toDouble();
+        _pendingLocationBuffer.add(record);
+      }
+
+      debugPrint(
+        '[LocationBuffer] loaded ${_pendingLocationBuffer.length} pending locations',
+      );
+    } catch (error) {
+      debugPrint('[LocationBuffer] load failed: $error');
+    }
+  }
+
+  Future<void> _persistLocationBuffer() async {
+    final file = _locationBufferFile;
+    if (file == null) return;
+
+    try {
+      await file.parent.create(recursive: true);
+      final temporaryFile = File('${file.path}.tmp');
+      await temporaryFile.writeAsString(
+        jsonEncode(_pendingLocationBuffer),
+        flush: true,
+      );
+      await temporaryFile.rename(file.path);
+    } catch (error) {
+      debugPrint('[LocationBuffer] save failed: $error');
+    }
+  }
+
+  Future<void> _flushLocationBuffer() async {
+    _locationBufferRetryTimer?.cancel();
+    _locationBufferRetryTimer = null;
+
+    if (!_isLocationTracking || _trackingStoppedByWeb) return;
+    if (_pendingLocationBuffer.isEmpty) return;
+
+    var sentCount = 0;
+    while (sentCount < _maxLocationsPerFlush &&
+        _pendingLocationBuffer.isNotEmpty &&
+        _isLocationTracking &&
+        !_trackingStoppedByWeb) {
+      final location = _pendingLocationBuffer.first;
+      final wasSent = await _postBufferedLocation(location);
+      if (wasSent == null) return;
+      if (!wasSent) {
+        _scheduleLocationBufferRetry(const Duration(seconds: 30));
+        return;
+      }
+
+      _pendingLocationBuffer.removeAt(0);
+      await _persistLocationBuffer();
+      sentCount++;
+
+      if (sentCount < _maxLocationsPerFlush &&
+          _pendingLocationBuffer.isNotEmpty) {
+        await Future<void>.delayed(_locationFlushInterval);
+      }
+    }
+
+    debugPrint(
+      '[LocationBuffer] sent $sentCount; '
+      '${_pendingLocationBuffer.length} still pending',
+    );
+    if (_pendingLocationBuffer.isNotEmpty) {
+      _scheduleLocationBufferRetry(const Duration(seconds: 1));
+    }
+  }
+
+  void _scheduleLocationBufferRetry(Duration delay) {
+    if (!_isLocationTracking || _trackingStoppedByWeb) return;
+
+    _locationBufferRetryTimer?.cancel();
+    _locationBufferRetryTimer = Timer(delay, () {
+      _locationBufferRetryTimer = null;
+      unawaited(_flushLocationBufferWhenReady());
+    });
+  }
+
+  Future<bool?> _postBufferedLocation(Map<String, dynamic> location) async {
+    final savedTruckId = (location['truckId'] ?? '').toString();
+    final savedDriverId = (location['driverId'] ?? '').toString();
+    final truckId = savedTruckId.isEmpty ? (_truckId ?? '') : savedTruckId;
+    final driverId = savedDriverId.isEmpty ? (_driverId ?? '') : savedDriverId;
+    final cookie = _authCookieValue ?? '';
+
+    if (truckId.isEmpty || driverId.isEmpty || cookie.isEmpty) {
+      debugPrint('[LocationBuffer] waiting for truck, driver, and auth cookie');
+      return null;
+    }
+
+    // Don't replay a previous driver's points under a different account.
+    if (truckId != _truckId || driverId != _driverId) {
+      debugPrint('[LocationBuffer] waiting for the original driver context');
+      return null;
+    }
+
+    if (savedTruckId.isEmpty || savedDriverId.isEmpty) {
+      location['truckId'] = truckId;
+      location['driverId'] = driverId;
+      await _persistLocationBuffer();
     }
 
     final uri = Uri.parse(
       '$_baseUrl/api/saveLocation/'
-      '$_truckId/'
-      '$_driverId/'
-      '${position.latitude}/'
-      '${position.longitude}',
+      '$truckId/'
+      '$driverId/'
+      '${location['latitude']}/'
+      '${location['longitude']}',
     );
 
     try {
-      final response = await http.get(
-        uri,
-        headers: {'Cookie': 'auth=$_authCookieValue'},
-      );
+      final response = await http
+          .get(uri, headers: {'Cookie': 'auth=$cookie'})
+          .timeout(const Duration(seconds: 10));
 
       debugPrint(
-        '[BackgroundLocation] '
-        'sent -> ${response.statusCode}: ${response.body}',
+        '[BackgroundLocation] sent -> ${response.statusCode}: ${response.body}',
       );
-    } catch (e) {
-      debugPrint('[BackgroundLocation] send error: $e');
+      return response.statusCode >= 200 && response.statusCode < 300;
+    } catch (error) {
+      debugPrint('[LocationBuffer] send failed; will retry later: $error');
+      return false;
     }
+  }
+
+  Future<void> _flushLocationBufferWhenReady() {
+    return _queueLocationWork(() async {
+      await _locationBufferReady;
+      await _flushLocationBuffer();
+    });
+  }
+
+  Future<void> _refreshContextAndFlushLocationBuffer() async {
+    await _checkCookies();
+    await _cacheDriverContext();
+    await _loadTruckId();
+    await _syncTrackingWithWeb();
+    await _flushLocationBufferWhenReady();
   }
 
   @override
@@ -602,14 +788,14 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
     _appLifecycleState = state;
     if (state == AppLifecycleState.resumed) {
       // รีเฟรช cookie/truck_id/driver_id ใหม่ทุกครั้งที่กลับมาหน้าจอ เผื่อมีการ login ใหม่
-      _checkCookies();
-      _cacheDriverContext();
+      unawaited(_refreshContextAndFlushLocationBuffer());
     }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _locationBufferRetryTimer?.cancel();
     _positionStreamSubscription?.cancel();
     super.dispose();
   }
