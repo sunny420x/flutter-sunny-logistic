@@ -26,17 +26,12 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>แอปต้องการเข้าถึงตำแหน่งของคุณเพื่อส่งพิกัดให้ระบบขนส่ง</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
 	<string>แอปต้องการเข้าถึงตำแหน่งของคุณตลอดเวลาเพื่อส่งพิกัดให้ระบบขนส่งแม้ปิดหน้าจอ</string>
 	<key>NSLocationAlwaysUsageDescription</key>
 	<string>แอปต้องการเข้าถึงตำแหน่งของคุณตลอดเวลาเพื่อส่งพิกัดให้ระบบขนส่งแม้ปิดหน้าจอ</string>
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>location</string>
-		<string>fetch</string>
-	</array>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>แอปต้องการเข้าถึงตำแหน่งของคุณเพื่อส่งพิกัดให้ระบบขนส่ง</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -60,6 +55,11 @@
 	</dict>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+		<string>fetch</string>
+	</array>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>
