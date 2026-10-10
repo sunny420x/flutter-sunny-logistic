@@ -17,7 +17,6 @@ import 'package:path_provider/path_provider.dart';
 void main() {
   runApp(const MyApp());
 }
-
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
@@ -54,9 +53,11 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
   Future<void> _locationBufferReady = Future<void>.value();
   Future<void> _locationWork = Future<void>.value();
   bool _isLoading = true;
+  bool _hasLoadError = false;
+  String? _currentPageUrl;
 
-  // final String _baseUrl = 'https://logistic.worldchemical.co.th';
-  final String _baseUrl = 'http://192.168.1.29:3000';
+  final String _baseUrl = 'https://logistic.worldchemical.co.th';
+  // final String _baseUrl = 'http://127.0.0.1:3001';
 
   // ค่าที่ cache ไว้จาก WebView เพื่อใช้ยิง API ตอนแอปอยู่ background
   StreamSubscription<Position>? _positionStreamSubscription;
@@ -65,6 +66,9 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
   String? _authCookieValue;
   bool _isLocationTracking = false;
   bool _trackingStoppedByWeb = true;
+  int _trackingRevision = 0;
+  bool _startingLocationTracking = false;
+  Timer? _trackingStartRetryTimer;
   AppLifecycleState _appLifecycleState = AppLifecycleState.resumed;
 
   @override
@@ -99,6 +103,7 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
           }
 
           if (message.message == 'startLocationTracking') {
+            _trackingRevision++;
             _trackingStoppedByWeb = false;
             unawaited(_startTrackingWhenReady());
           }
@@ -114,34 +119,34 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
             }
             return NavigationDecision.navigate;
           },
+          onPageStarted: (String url) {
+            if (!mounted) return;
+            _currentPageUrl = url;
+            setState(() {
+              _isLoading = true;
+            });
+          },
           onPageFinished: (String url) async {
+            if (!mounted || _hasLoadError) return;
             setState(() {
               _isLoading = false;
             });
 
-            await _checkCookies();
-            // driver_id มาจาก WebView
-            await _cacheDriverContext();
-            // truck_id ดึงจาก API โดย Flutter
-            await _loadTruckId();
-            debugPrint(
-              '[Flutter] context: '
-              'driver_id=$_driverId '
-              'truck_id=$_truckId',
-            );
-
-            if (_driverId == null || _truckId == null) {
-              debugPrint(
-                '[Flutter] Context ยังไม่พร้อม ไม่เริ่ม Background Tracking',
-              );
-              await _stopLocationTracking();
-              return;
-            }
-
             await _syncTrackingWithWeb();
+          },
+          onHttpError: (error) {
+            if (_isMainPageError(
+              null, // HTTP errors expose a URL, not a main-frame flag.
+              error.request?.uri.toString(),
+            )) {
+              _showLoadError();
+            }
           },
           onWebResourceError: (error) {
             debugPrint('WebView error: ${error.description}');
+            if (_isMainPageError(error.isForMainFrame, error.url)) {
+              _showLoadError();
+            }
           },
         ),
       );
@@ -156,13 +161,44 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
     }
 
     _controller = controller;
-    _controller.loadRequest(Uri.parse(_baseUrl));
+    unawaited(_loadWebsite());
+  }
+
+  bool _isMainPageError(bool? isForMainFrame, String? url) {
+    if (isForMainFrame != null) return isForMainFrame;
+    return url != null && url == (_currentPageUrl ?? _baseUrl);
+  }
+
+  void _showLoadError() {
+    if (!mounted) return;
+    setState(() {
+      _hasLoadError = true;
+      _isLoading = false;
+    });
+  }
+
+  Future<void> _loadWebsite() async {
+    if (!mounted) return;
+    setState(() {
+      _hasLoadError = false;
+      _isLoading = true;
+    });
+    _currentPageUrl = _baseUrl;
+    try {
+      await _controller.loadRequest(Uri.parse(_baseUrl));
+    } catch (error) {
+      debugPrint('Cannot load website: $error');
+      _showLoadError();
+    }
   }
 
   Future<void> _stopLocationTracking() async {
     debugPrint('[BackgroundLocation] STOP requested from WebView');
 
     _trackingStoppedByWeb = true;
+    _trackingRevision++;
+    _trackingStartRetryTimer?.cancel();
+    _trackingStartRetryTimer = null;
     _isLocationTracking = false;
     _locationBufferRetryTimer?.cancel();
     _locationBufferRetryTimer = null;
@@ -177,20 +213,41 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
   }
 
   Future<void> _startTrackingWhenReady() async {
-    await _checkCookies();
-    await _cacheDriverContext();
-    await _loadTruckId();
-    if (_trackingStoppedByWeb || _truckId == null || _driverId == null) return;
-    await _ensureLocationPermission();
-    if (_trackingStoppedByWeb) return;
-    await _startBackgroundLocationTracking();
+    if (_startingLocationTracking || _trackingStoppedByWeb || _isLocationTracking) return;
+    _startingLocationTracking = true;
+    final revision = _trackingRevision;
+    try {
+      await _checkCookies();
+      if (_trackingStoppedByWeb || revision != _trackingRevision) return;
+      await _cacheDriverContext();
+      if (_trackingStoppedByWeb || revision != _trackingRevision) return;
+      await _loadTruckId();
+      if (_trackingStoppedByWeb || revision != _trackingRevision || _truckId == null || _driverId == null) return;
+      await _ensureLocationPermission();
+      if (_trackingStoppedByWeb || revision != _trackingRevision) return;
+      await _startBackgroundLocationTracking();
+      if (_isLocationTracking && !_trackingStoppedByWeb) await _requestCurrentLocationNow();
+    } catch (error) {
+      debugPrint('[Location] Start deferred: $error');
+    } finally {
+      _startingLocationTracking = false;
+      if (mounted && !_trackingStoppedByWeb && !_isLocationTracking) {
+        _trackingStartRetryTimer?.cancel();
+        _trackingStartRetryTimer = Timer(const Duration(seconds: 5), () {
+          unawaited(_startTrackingWhenReady());
+        });
+      }
+    }
   }
 
   Future<void> _syncTrackingWithWeb() async {
+    final revision = _trackingRevision;
     try {
       final result = await _controller.runJavaScriptReturningResult(
-        'typeof shouldReportDriverLocation === "function" && shouldReportDriverLocation()',
+        'typeof shouldReportDriverLocation !== "function" ? "false" : '
+        '(typeof routesLoaded !== "undefined" && !routesLoaded ? "pending" : String(shouldReportDriverLocation()))',
       );
+      if (!mounted || revision != _trackingRevision || _unwrapJsString(result) == 'pending') return;
       if (_unwrapJsString(result) == 'true') {
         _trackingStoppedByWeb = false;
         await _startTrackingWhenReady();
@@ -198,7 +255,6 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
         await _stopLocationTracking();
       }
     } catch (error) {
-      await _stopLocationTracking();
       debugPrint('[Location] Cannot read work status: $error');
     }
   }
@@ -352,9 +408,7 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
     return value;
   }
 
-  Future<List<String>> _androidFilePicker(
-    FileSelectorParams params,
-  ) async {
+  Future<List<String>> _androidFilePicker(FileSelectorParams params) async {
     final ImagePicker picker = ImagePicker();
     try {
       final ImageSource? source = await showDialog<ImageSource>(
@@ -364,10 +418,7 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
           content: const Text('กรุณาเลือกช่องทางในการอัปโหลดรูปภาพ'),
           actions: [
             TextButton(
-              onPressed: () => Navigator.pop(
-                context,
-                ImageSource.camera,
-              ),
+              onPressed: () => Navigator.pop(context, ImageSource.camera),
               style: TextButton.styleFrom(
                 textStyle: const TextStyle(fontSize: 18),
               ),
@@ -375,10 +426,7 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
             ),
 
             TextButton(
-              onPressed: () => Navigator.pop(
-                context,
-                ImageSource.gallery,
-              ),
+              onPressed: () => Navigator.pop(context, ImageSource.gallery),
               style: TextButton.styleFrom(
                 textStyle: const TextStyle(fontSize: 18),
               ),
@@ -404,17 +452,13 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
       }
 
       if (source == ImageSource.camera) {
-        final XFile? photo = await picker.pickImage(
-          source: ImageSource.camera,
-        );
+        final XFile? photo = await picker.pickImage(source: ImageSource.camera);
 
         if (photo == null) {
           return [];
         }
 
-        return [
-          Uri.file(photo.path).toString(),
-        ];
+        return [Uri.file(photo.path).toString()];
       }
 
       if (source == ImageSource.gallery) {
@@ -480,6 +524,7 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
   }
 
   Future<void> _startBackgroundLocationTracking() async {
+    final revision = _trackingRevision;
     if (_isLocationTracking) {
       debugPrint('[BackgroundLocation] Already running.');
       return;
@@ -529,7 +574,7 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
 
     await _positionStreamSubscription?.cancel();
 
-    if (_trackingStoppedByWeb || _isLocationTracking) return;
+    if (_trackingStoppedByWeb || _isLocationTracking || revision != _trackingRevision) return;
 
     debugPrint('[BackgroundLocation] Creating stream...');
 
@@ -614,12 +659,10 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
 
   Future<void> _queueLocationWork(Future<void> Function() work) {
     final operation = _locationWork.then((_) => work());
-    _locationWork = operation.catchError(
-      (Object error, StackTrace stackTrace) {
-        debugPrint('[LocationBuffer] queued work failed: $error');
-        debugPrintStack(stackTrace: stackTrace);
-      },
-    );
+    _locationWork = operation.catchError((Object error, StackTrace stackTrace) {
+      debugPrint('[LocationBuffer] queued work failed: $error');
+      debugPrintStack(stackTrace: stackTrace);
+    });
     return _locationWork;
   }
 
@@ -794,6 +837,7 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _trackingStartRetryTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _locationBufferRetryTimer?.cancel();
     _positionStreamSubscription?.cancel();
@@ -822,14 +866,102 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
     }
   }
 
+  Widget _buildLoadError(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return ColoredBox(
+      color: const Color(0xFFF5F9FF),
+      child: LayoutBuilder(
+        builder: (context, constraints) => SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              minHeight: (constraints.maxHeight - 48).clamp(
+                0.0,
+                double.infinity,
+              ),
+            ),
+            child: Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 400),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(28),
+                      decoration: BoxDecoration(
+                        color: colors.primaryContainer,
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(
+                        Icons.cloud_off_rounded,
+                        size: 64,
+                        color: colors.primary,
+                      ),
+                    ),
+                    const SizedBox(height: 28),
+                    const Text(
+                      'เชื่อมต่อระบบไม่ได้ชั่วคราว',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF234567),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    const Text(
+                      'ระบบอาจกำลังพักสักครู่ หรืออินเทอร์เน็ตไม่พร้อม\n'
+                      'กรุณาตรวจสอบการเชื่อมต่อ แล้วลองอีกครั้งนะครับ',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 16,
+                        height: 1.6,
+                        color: Color(0xFF607080),
+                      ),
+                    ),
+                    const SizedBox(height: 28),
+                    FilledButton.icon(
+                      onPressed: () => unawaited(_loadWebsite()),
+                      icon: const Icon(Icons.refresh_rounded),
+                      label: const Text('ลองเชื่อมต่ออีกครั้ง'),
+                      style: FilledButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 24,
+                          vertical: 14,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+                    const Text(
+                      'Sunny Logistic',
+                      style: TextStyle(color: Color(0xFF607080)),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: SafeArea(
         child: Stack(
           children: [
+            // Keep the WebView mounted so a retry uses the same controller.
             WebViewWidget(controller: _controller),
-            if (_isLoading) const Center(child: CircularProgressIndicator()),
+            if (_hasLoadError) Positioned.fill(child: _buildLoadError(context)),
+            if (_isLoading)
+              const Positioned.fill(
+                child: ColoredBox(
+                  color: Color(0xFFF5F9FF),
+                  child: Center(child: CircularProgressIndicator()),
+                ),
+              ),
           ],
         ),
       ),
