@@ -68,6 +68,8 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
   bool _trackingStoppedByWeb = true;
   int _trackingRevision = 0;
   bool _startingLocationTracking = false;
+  // Pages without a delivery work policy (service navigation) only need the position drawn on the map.
+  bool _reportsToServer = true;
   Timer? _trackingStartRetryTimer;
   AppLifecycleState _appLifecycleState = AppLifecycleState.resumed;
 
@@ -158,6 +160,17 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
       (controller.platform as AndroidWebViewController).setOnShowFileSelector(
         _androidFilePicker,
       );
+      // Let the page use navigator.geolocation; without this Android WebView refuses it silently.
+      (controller.platform as AndroidWebViewController)
+          .setGeolocationPermissionsPromptCallbacks(
+            onShowPrompt: (GeolocationPermissionsRequestParams params) async {
+              final status = await Permission.locationWhenInUse.request();
+              return GeolocationPermissionsResponse(
+                allow: status.isGranted,
+                retain: status.isGranted,
+              );
+            },
+          );
     }
 
     _controller = controller;
@@ -221,8 +234,10 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
       if (_trackingStoppedByWeb || revision != _trackingRevision) return;
       await _cacheDriverContext();
       if (_trackingStoppedByWeb || revision != _trackingRevision) return;
-      await _loadTruckId();
-      if (_trackingStoppedByWeb || revision != _trackingRevision || _truckId == null || _driverId == null) return;
+      _reportsToServer = await _pageReportsLocation();
+      if (_reportsToServer) await _loadTruckId();
+      if (_trackingStoppedByWeb || revision != _trackingRevision || _driverId == null) return;
+      if (_reportsToServer && _truckId == null) return;
       await _ensureLocationPermission();
       if (_trackingStoppedByWeb || revision != _trackingRevision) return;
       await _startBackgroundLocationTracking();
@@ -240,15 +255,29 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
     }
   }
 
+  Future<bool> _pageReportsLocation() async {
+    try {
+      final result = await _controller.runJavaScriptReturningResult(
+        'String(typeof shouldReportDriverLocation === "function")',
+      );
+      return _unwrapJsString(result) == 'true';
+    } catch (error) {
+      debugPrint('[Location] Cannot read page type: $error');
+      return true;
+    }
+  }
+
   Future<void> _syncTrackingWithWeb() async {
     final revision = _trackingRevision;
     try {
       final result = await _controller.runJavaScriptReturningResult(
-        'typeof shouldReportDriverLocation !== "function" ? "false" : '
+        'typeof shouldReportDriverLocation !== "function" ? '
+        '(typeof renderCurrentLocation === "function" ? "local" : "false") : '
         '(typeof routesLoaded !== "undefined" && !routesLoaded ? "pending" : String(shouldReportDriverLocation()))',
       );
       if (!mounted || revision != _trackingRevision || _unwrapJsString(result) == 'pending') return;
-      if (_unwrapJsString(result) == 'true') {
+      final mode = _unwrapJsString(result);
+      if (mode == 'true' || mode == 'local') {
         _trackingStoppedByWeb = false;
         await _startTrackingWhenReady();
       } else {
@@ -313,7 +342,7 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
 
       // ส่ง API ทันที
       if (_isLocationTracking && !_trackingStoppedByWeb) {
-        await _sendLocationToServer(position);
+        if (_reportsToServer) await _sendLocationToServer(position);
       }
     } catch (e) {
       debugPrint('[Location] Immediate location error: $e');
@@ -631,7 +660,7 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
       return;
     }
 
-    await _sendLocationToServer(position);
+    if (_reportsToServer) await _sendLocationToServer(position);
   }
 
   Future<void> _sendLocationToServer(Position position) {
