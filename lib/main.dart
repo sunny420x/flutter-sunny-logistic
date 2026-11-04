@@ -878,6 +878,8 @@ class _WebViewPageState extends State<WebViewPage> with WidgetsBindingObserver {
         '''
       position_latitude = ${position.latitude};
       position_longitude = ${position.longitude};
+      // The service page draws its position marker here; updateDriverMap() only handles routes.
+      if (typeof renderCurrentLocation === 'function') renderCurrentLocation();
       if (typeof updateDriverMap === 'function') {
         updateDriverMap();
       } else {
